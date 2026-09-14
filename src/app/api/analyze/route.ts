@@ -1,6 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { parseQueryWithGroq } from '@/lib/groq';
 
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 200,
+    headers: CORS_HEADERS
+  });
+}
+
 interface AnalyzeRequestBody {
   query?: string;
   apiKey?: string;
@@ -14,7 +27,7 @@ export async function POST(incomingRequest: NextRequest) {
     if (!rawTradingQuery || typeof rawTradingQuery !== 'string' || rawTradingQuery.trim().length === 0) {
       return NextResponse.json(
         { error: 'A trading research query is required.' },
-        { status: 400 }
+        { status: 400, headers: CORS_HEADERS }
       );
     }
 
@@ -27,11 +40,14 @@ export async function POST(incomingRequest: NextRequest) {
     );
     const executionDurationMilliseconds = Date.now() - analysisStartTime;
 
-    return NextResponse.json({
-      experiment: groqAnalysisResult.experiment,
-      aiProvider: groqAnalysisResult.provider,
-      latencyMs: executionDurationMilliseconds
-    });
+    return NextResponse.json(
+      {
+        experiment: groqAnalysisResult.experiment,
+        aiProvider: groqAnalysisResult.provider,
+        latencyMs: executionDurationMilliseconds
+      },
+      { headers: CORS_HEADERS }
+    );
   } catch (caughtError) {
     const errorMessage =
       caughtError instanceof Error
@@ -45,7 +61,7 @@ export async function POST(incomingRequest: NextRequest) {
 
     return NextResponse.json(
       { error: errorMessage },
-      { status: isClientInputError ? 400 : 500 }
+      { status: isClientInputError ? 400 : 500, headers: CORS_HEADERS }
     );
   }
 }

@@ -65,7 +65,8 @@ export default function Home() {
     setActiveQueryText(searchQueryText);
 
     try {
-      const apiResponse = await fetch('/api/analyze', {
+      const backendBaseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || '';
+      const apiResponse = await fetch(`${backendBaseUrl}/api/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
