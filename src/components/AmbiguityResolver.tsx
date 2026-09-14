@@ -74,7 +74,7 @@ export const AmbiguityResolver: React.FC<AmbiguityResolverProps> = ({
               <Check className="w-3.5 h-3.5" />
             </div>
             <span className="text-xs font-mono text-zinc-800 font-medium">
-              Parameters resolved. Strategy is ready for testing.
+              All missing parameters have been resolved.
             </span>
           </div>
           <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded-sm border border-zinc-900 bg-zinc-900 text-white">

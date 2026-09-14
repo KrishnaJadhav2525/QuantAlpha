@@ -25,7 +25,7 @@ export const ExtractionBadges: React.FC<ExtractionBadgesProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 border-b border-zinc-200 pb-2">
         <div className="flex items-center space-x-2">
           <span className="text-xs font-bold text-zinc-950 uppercase tracking-wider">
-            Step 1 · Natural Language Entity Recognition
+            Extracted Variables
           </span>
           <span className="text-[10px] text-zinc-500">
             ({specifiedEntities.length} identified, {missingEntities.length} missing)

@@ -246,7 +246,7 @@ export default function Home() {
         )}
 
         <footer className="border-t border-zinc-300 pt-5 text-center text-xs font-mono text-zinc-500">
-          <span>QuantAlpha Terminal · Dual-Tone Monochrome Architecture</span>
+          <span>QuantAlpha · AI Trading Research Assistant</span>
         </footer>
       </main>
 
