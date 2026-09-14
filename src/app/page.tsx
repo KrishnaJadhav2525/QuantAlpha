@@ -86,6 +86,7 @@ export default function Home() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to analyze query.';
       setErrorMessage(message);
+      setActiveExperiment(null);
     } finally {
       setIsAnalyzingQuery(false);
     }

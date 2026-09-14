@@ -1,108 +1,128 @@
-import { StructuredExperiment, MissingField, ExtractedEntity } from '@/types/experiment';
+import { StructuredExperiment, MissingField, ExtractedEntity, TradeDirection } from '@/types/experiment';
 
-interface GroqParsedPayload {
+interface GroqResponsePayload {
+  isTradingQuery: boolean;
+  message?: string;
   title?: string;
-  instrument?: string;
-  assetClass?: StructuredExperiment['assetClass'];
+  instrument?: string | null;
+  assetClass?: StructuredExperiment['assetClass'] | null;
   timeframe?: string | null;
-  direction?: StructuredExperiment['direction'];
-  entryCondition?: string;
+  direction?: 'LONG' | 'SHORT' | null;
+  entryCondition?: string | null;
   exitCondition?: string | null;
   holdingPeriod?: string | null;
-  filters?: string[] | Record<string, string>;
+  filters?: string[] | null;
   benchmark?: string | null;
   targetHypothesis?: string;
-  missingFields?: unknown;
+  missingParameters?: string[];
 }
 
-const GROQ_MODEL_IDENTIFIER = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 
-const GROQ_SYSTEM_INSTRUCTION = `You are a quantitative trading research assistant.
-Your task is to parse a trading question into a structured experiment.
-Identify:
-1. Instrument (e.g. NIFTY 50, BANKNIFTY, etc.)
-2. Timeframe (e.g. Daily, 15 Minutes, etc., or null if not specified)
-3. Direction (LONG or SHORT)
-4. Entry condition
-5. Exit condition (null if not specified)
-6. Holding period (null if not specified)
-7. Filters (array of conditions like "High volatility", or empty array)
-8. Question (the user's core question)
-9. Missing fields (array of missing parameter names: "holdingPeriod", "exitCondition", "timeframe", "filters")
+const SYSTEM_PROMPT = `You are an institutional quantitative trading research parser.
+Analyze the user's sentence and extract the trading hypothesis parameters.
 
-Return strictly JSON matching this structure:
+RULES:
+1. VALIDATION:
+   If the input is NOT a trading strategy, market question, or financial hypothesis (e.g. casual conversation like "hi", "who are you", random words):
+   Return strictly JSON:
+   {
+     "isTradingQuery": false,
+     "message": "Please enter a trading hypothesis or market question (for example: 'Does buying NIFTY after a 1% fall work better during high-volatility periods?' or 'Sell TSLA if it breaks below 200 on 15m chart')."
+   }
+
+2. PURE EXTRACTION (NO ASSUMPTIONS):
+   Extract ONLY the parameters that are explicitly mentioned or clearly implied in the user's sentence.
+   - If no instrument is in the sentence, "instrument" must be null.
+   - If no entry condition is in the sentence, "entryCondition" must be null.
+   - If no timeframe is in the sentence, "timeframe" must be null.
+   - If no exit rule is in the sentence, "exitCondition" must be null.
+   - If no holding duration is in the sentence, "holdingPeriod" must be null.
+   - If direction (buy/long vs sell/short) is not in the sentence, "direction" must be null.
+   - "missingParameters" must list every parameter that is missing from the query and needed for a complete backtest (choose from: ["instrument", "entryCondition", "timeframe", "exitCondition", "holdingPeriod"]).
+
+Return strictly JSON matching this schema:
 {
-  "instrument": "NIFTY 50",
-  "timeframe": null,
-  "direction": "LONG",
-  "entryCondition": "NIFTY falls >= 1%",
-  "exitCondition": null,
-  "holdingPeriod": null,
-  "filters": ["High volatility"],
-  "benchmark": "NIFTY 50",
-  "targetHypothesis": "Does buying NIFTY after a 1% fall work better during high-volatility periods?",
-  "missingFields": ["holdingPeriod", "exitCondition", "timeframe"]
+  "isTradingQuery": true,
+  "instrument": string | null,
+  "assetClass": "Index" | "Equity" | "Commodity" | "Crypto" | "Forex" | null,
+  "timeframe": string | null,
+  "direction": "LONG" | "SHORT" | null,
+  "entryCondition": string | null,
+  "exitCondition": string | null,
+  "holdingPeriod": string | null,
+  "filters": string[],
+  "benchmark": string | null,
+  "targetHypothesis": string,
+  "missingParameters": string[]
 }`;
 
-function buildGroqPayloadBody(userQuery: string): string {
-  return JSON.stringify({
-    model: GROQ_MODEL_IDENTIFIER,
-    messages: [
-      {
-        role: 'system',
-        content: GROQ_SYSTEM_INSTRUCTION
-      },
-      {
-        role: 'user',
-        content: `Parse this trading query: "${userQuery}"`
-      }
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.1
-  });
-}
-
-function normalizeFilterList(rawFilters: string[] | Record<string, string> | undefined): string[] {
-  if (!rawFilters) {
-    return [];
-  }
-
-  if (Array.isArray(rawFilters)) {
-    return rawFilters;
-  }
-
-  return Object.entries(rawFilters).map(
-    ([filterKey, filterValue]) => `${filterKey}: ${filterValue}`
-  );
-}
-
-function normalizeDirection(rawDirection: string | undefined): StructuredExperiment['direction'] {
-  if (!rawDirection) {
-    return 'LONG';
-  }
-
-  const uppercase = rawDirection.toUpperCase();
-  if (uppercase.includes('SHORT') || uppercase.includes('SELL')) {
-    return 'SHORT';
-  }
-
-  return 'LONG';
-}
-
-function buildDefaultMissingFields(
-  holdingPeriod: string | null,
-  exitCondition: string | null,
-  timeframe: string | null
-): MissingField[] {
-  const missingFieldList: MissingField[] = [];
-
-  if (!holdingPeriod) {
-    missingFieldList.push({
+function buildMissingFieldDefinitions(missingParameterNames: string[]): MissingField[] {
+  const definitions: Record<string, MissingField> = {
+    instrument: {
+      id: 'missing_instrument',
+      field: 'instrument',
+      label: 'Target Instrument',
+      importance: 'critical',
+      explanation: 'No asset or ticker was detected in the prompt.',
+      question: 'Which instrument or asset do you want to test?',
+      suggestedOptions: [
+        { label: 'NIFTY 50', value: 'NIFTY 50', description: 'NSE Benchmark Index', isDefault: true },
+        { label: 'BANKNIFTY', value: 'BANKNIFTY', description: 'NSE Banking Index' },
+        { label: 'S&P 500 (SPY)', value: 'SPY', description: 'US Benchmark ETF' },
+        { label: 'Bitcoin (BTC)', value: 'BTC/USD', description: 'Cryptocurrency' }
+      ],
+      allowCustom: true
+    },
+    entryCondition: {
+      id: 'missing_entry_condition',
+      field: 'entryCondition',
+      label: 'Entry Trigger',
+      importance: 'critical',
+      explanation: 'No entry signal or price trigger was detected.',
+      question: 'What is the entry trigger condition?',
+      suggestedOptions: [
+        { label: 'Price drops >= 1%', value: 'Price falls >= 1%', description: 'Pullback trigger', isDefault: true },
+        { label: 'Price drops >= 2%', value: 'Price falls >= 2%', description: 'Deeper dip trigger' },
+        { label: 'RSI(14) < 30', value: 'RSI(14) < 30', description: 'Oversold indicator trigger' }
+      ],
+      allowCustom: true
+    },
+    timeframe: {
+      id: 'missing_timeframe',
+      field: 'timeframe',
+      label: 'Timeframe',
+      importance: 'recommended',
+      explanation: 'Candle resolution for calculating the signal.',
+      question: 'Which chart timeframe should be evaluated?',
+      suggestedOptions: [
+        { label: 'Daily', value: 'Daily', description: 'Daily chart candles', isDefault: true },
+        { label: '15 Minutes', value: '15 Minutes', description: '15m intraday resolution' },
+        { label: '1 Hour', value: '1 Hour', description: 'Hourly resolution' }
+      ],
+      allowCustom: true
+    },
+    exitCondition: {
+      id: 'missing_exit_condition',
+      field: 'exitCondition',
+      label: 'Exit Rule',
+      importance: 'critical',
+      explanation: 'Profit targets or stop-loss boundaries.',
+      question: 'What is the exit condition?',
+      suggestedOptions: [
+        { label: 'Take Profit: 2% / Stop Loss: 1%', value: 'TP: +2%, SL: -1%', description: 'Fixed risk-to-reward ratio', isDefault: true },
+        { label: 'Trailing Stop (1.5x ATR)', value: 'Trailing Stop 1.5x ATR', description: 'Volatility-adjusted trailing stop' },
+        { label: 'Exit on first green candle', value: 'First profitable day close', description: 'Exit on positive session close' },
+        { label: 'Time exit only', value: 'Time exit only', description: 'Exit solely when holding period expires' }
+      ],
+      allowCustom: true
+    },
+    holdingPeriod: {
       id: 'missing_holding_period',
       field: 'holdingPeriod',
       label: 'Holding Period',
       importance: 'critical',
-      explanation: 'Position duration before closing.',
+      explanation: 'Position duration before closing the trade.',
       question: 'How long should the position be held?',
       suggestedOptions: [
         { label: '1 Day (Next Day Close)', value: '1 Day', description: 'Exit at next day close', isDefault: true },
@@ -111,67 +131,18 @@ function buildDefaultMissingFields(
         { label: 'Intraday', value: 'Intraday', description: 'Square off before market close' }
       ],
       allowCustom: true
-    });
+    }
+  };
+
+  const resolvedList: MissingField[] = [];
+  for (const param of missingParameterNames) {
+    const matched = definitions[param];
+    if (matched) {
+      resolvedList.push(matched);
+    }
   }
 
-  if (!exitCondition) {
-    missingFieldList.push({
-      id: 'missing_exit_condition',
-      field: 'exitCondition',
-      label: 'Exit Rule',
-      importance: 'critical',
-      explanation: 'Stop loss or profit target criteria.',
-      question: 'What is the exit condition?',
-      suggestedOptions: [
-        { label: 'Take Profit: 2% / Stop Loss: 1%', value: 'TP: +2%, SL: -1%', description: 'Fixed risk-to-reward ratio', isDefault: true },
-        { label: 'Trailing Stop (1.5x ATR)', value: 'Trailing Stop 1.5x ATR', description: 'Volatility-adjusted trailing stop' },
-        { label: 'Exit on first green candle', value: 'First profitable day close', description: 'Exit on positive session close' },
-        { label: 'Time exit only', value: 'Time exit only', description: 'Exit purely when holding period expires' }
-      ],
-      allowCustom: true
-    });
-  }
-
-  if (!timeframe) {
-    missingFieldList.push({
-      id: 'missing_timeframe',
-      field: 'timeframe',
-      label: 'Timeframe',
-      importance: 'recommended',
-      explanation: 'Candle resolution for signal calculation.',
-      question: 'Which timeframe should be evaluated?',
-      suggestedOptions: [
-        { label: 'Daily', value: 'Daily', description: 'Daily chart candles', isDefault: true },
-        { label: '15 Minutes', value: '15 Minutes', description: '15-minute intraday candles' },
-        { label: '1 Hour', value: '1 Hour', description: 'Hourly chart candles' }
-      ],
-      allowCustom: true
-    });
-  }
-
-  return missingFieldList;
-}
-
-function buildEntitiesList(
-  instrument: string,
-  timeframe: string | null,
-  direction: StructuredExperiment['direction'],
-  entryCondition: string,
-  exitCondition: string | null,
-  holdingPeriod: string | null,
-  filters: string[],
-  targetHypothesis: string
-): ExtractedEntity[] {
-  return [
-    { field: 'instrument', label: 'Instrument', value: instrument, confidence: 1.0, status: 'specified' },
-    { field: 'timeframe', label: 'Timeframe', value: timeframe, confidence: timeframe ? 1.0 : 0.0, status: timeframe ? 'specified' : 'missing' },
-    { field: 'direction', label: 'Direction', value: direction, confidence: 1.0, status: 'specified' },
-    { field: 'entryCondition', label: 'Entry Condition', value: entryCondition, confidence: 1.0, status: 'specified' },
-    { field: 'exitCondition', label: 'Exit Condition', value: exitCondition, confidence: exitCondition ? 1.0 : 0.0, status: exitCondition ? 'specified' : 'missing' },
-    { field: 'holdingPeriod', label: 'Holding Period', value: holdingPeriod, confidence: holdingPeriod ? 1.0 : 0.0, status: holdingPeriod ? 'specified' : 'missing' },
-    { field: 'filters', label: 'Filter', value: filters.length > 0 ? filters : null, confidence: filters.length > 0 ? 1.0 : 0.0, status: filters.length > 0 ? 'specified' : 'inferred' },
-    { field: 'targetHypothesis', label: 'Question', value: targetHypothesis, confidence: 1.0, status: 'specified' }
-  ];
+  return resolvedList;
 }
 
 export async function parseQueryWithGroq(
@@ -181,84 +152,143 @@ export async function parseQueryWithGroq(
   experiment: StructuredExperiment;
   provider: 'groq-gpt-oss-120b';
 }> {
+  const userText = query.trim();
   const activeApiKey = providedApiKey || process.env.GROQ_API_KEY;
 
   if (!activeApiKey) {
-    throw new Error('GROQ_API_KEY is not configured. Please provide an API key in settings or set GROQ_API_KEY in your environment.');
+    throw new Error('GROQ_API_KEY is not configured. Please provide an API key in settings or configure GROQ_API_KEY in your deployment.');
   }
 
   const endpointUrl = 'https://api.groq.com/openai/v1/chat/completions';
-  const requestBody = buildGroqPayloadBody(query);
-
   const apiResponse = await fetch(endpointUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${activeApiKey}`
     },
-    body: requestBody
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: userText }
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.0
+    })
   });
 
   if (!apiResponse.ok) {
     const errorBody = await apiResponse.text();
-    throw new Error(`Groq API returned error ${apiResponse.status}: ${errorBody}`);
+    throw new Error(`Groq API error (${apiResponse.status}): ${errorBody}`);
   }
 
   const responseJson = await apiResponse.json();
-  const candidateChoice = responseJson?.choices?.[0]?.message;
-  const generatedText = candidateChoice?.content;
+  const content = responseJson?.choices?.[0]?.message?.content;
 
-  if (!generatedText) {
+  if (!content) {
     throw new Error('Groq returned an empty response.');
   }
 
-  const parsedPayload: GroqParsedPayload = JSON.parse(generatedText);
+  const result: GroqResponsePayload = JSON.parse(content);
 
-  const chosenInstrument = parsedPayload.instrument || 'NIFTY 50';
-  const chosenTimeframe = parsedPayload.timeframe || null;
-  const chosenDirection = normalizeDirection(parsedPayload.direction);
-  const chosenEntryCondition = parsedPayload.entryCondition || `${chosenInstrument} falls >= 1%`;
-  const chosenExitCondition = parsedPayload.exitCondition || null;
-  const chosenHoldingPeriod = parsedPayload.holdingPeriod || null;
-  const chosenFilters = normalizeFilterList(parsedPayload.filters);
-  const chosenHypothesis = parsedPayload.targetHypothesis || query;
+  if (result.isTradingQuery === false) {
+    throw new Error(result.message || 'No trading strategy or market condition detected. Please enter a trading research hypothesis.');
+  }
 
-  const entities = buildEntitiesList(
-    chosenInstrument,
-    chosenTimeframe,
-    chosenDirection,
-    chosenEntryCondition,
-    chosenExitCondition,
-    chosenHoldingPeriod,
-    chosenFilters,
-    chosenHypothesis
-  );
+  const extractedInstrument = result.instrument || null;
+  const extractedTimeframe = result.timeframe || null;
+  const extractedDirection: TradeDirection = result.direction || 'UNSPECIFIED';
+  const extractedEntry = result.entryCondition || null;
+  const extractedExit = result.exitCondition || null;
+  const extractedHolding = result.holdingPeriod || null;
+  const extractedFilters = Array.isArray(result.filters) ? result.filters : [];
+  const extractedHypothesis = result.targetHypothesis || userText;
 
-  const missingFields = buildDefaultMissingFields(
-    chosenHoldingPeriod,
-    chosenExitCondition,
-    chosenTimeframe
-  );
+  const missingParamNames = Array.isArray(result.missingParameters) ? result.missingParameters : [];
+  const missingFields = buildMissingFieldDefinitions(missingParamNames);
+
+  const entities: ExtractedEntity[] = [
+    {
+      field: 'instrument',
+      label: 'Instrument',
+      value: extractedInstrument,
+      confidence: extractedInstrument ? 1.0 : 0.0,
+      status: extractedInstrument ? 'specified' : 'missing'
+    },
+    {
+      field: 'timeframe',
+      label: 'Timeframe',
+      value: extractedTimeframe,
+      confidence: extractedTimeframe ? 1.0 : 0.0,
+      status: extractedTimeframe ? 'specified' : 'missing'
+    },
+    {
+      field: 'direction',
+      label: 'Direction',
+      value: extractedDirection !== 'UNSPECIFIED' ? extractedDirection : null,
+      confidence: extractedDirection !== 'UNSPECIFIED' ? 1.0 : 0.0,
+      status: extractedDirection !== 'UNSPECIFIED' ? 'specified' : 'missing'
+    },
+    {
+      field: 'entryCondition',
+      label: 'Entry Condition',
+      value: extractedEntry,
+      confidence: extractedEntry ? 1.0 : 0.0,
+      status: extractedEntry ? 'specified' : 'missing'
+    },
+    {
+      field: 'exitCondition',
+      label: 'Exit Condition',
+      value: extractedExit,
+      confidence: extractedExit ? 1.0 : 0.0,
+      status: extractedExit ? 'specified' : 'missing'
+    },
+    {
+      field: 'holdingPeriod',
+      label: 'Holding Period',
+      value: extractedHolding,
+      confidence: extractedHolding ? 1.0 : 0.0,
+      status: extractedHolding ? 'specified' : 'missing'
+    },
+    {
+      field: 'filters',
+      label: 'Filter',
+      value: extractedFilters.length > 0 ? extractedFilters : null,
+      confidence: extractedFilters.length > 0 ? 1.0 : 0.0,
+      status: extractedFilters.length > 0 ? 'specified' : 'inferred'
+    },
+    {
+      field: 'targetHypothesis',
+      label: 'Question',
+      value: extractedHypothesis,
+      confidence: 1.0,
+      status: 'specified'
+    }
+  ];
 
   const randomSuffix = Math.random().toString(36).substring(2, 9);
-  const currentTimestamp = new Date().toISOString();
+  const now = new Date().toISOString();
 
-  const finalizedExperiment: StructuredExperiment = {
+  const title = extractedInstrument
+    ? `${extractedInstrument} Strategy Experiment`
+    : 'Custom Strategy Experiment';
+
+  const experiment: StructuredExperiment = {
     id: `exp_${randomSuffix}`,
-    createdAt: currentTimestamp,
-    updatedAt: currentTimestamp,
-    originalQuery: query,
-    title: parsedPayload.title || `${chosenInstrument} Strategy Experiment`,
-    instrument: chosenInstrument,
-    assetClass: parsedPayload.assetClass || 'Index',
-    timeframe: chosenTimeframe || 'Not specified',
-    direction: chosenDirection,
-    entryCondition: chosenEntryCondition,
-    exitCondition: chosenExitCondition || 'Not specified',
-    holdingPeriod: chosenHoldingPeriod || 'Not specified',
-    filters: chosenFilters,
-    benchmark: parsedPayload.benchmark || chosenInstrument,
-    targetHypothesis: chosenHypothesis,
+    createdAt: now,
+    updatedAt: now,
+    originalQuery: userText,
+    title: result.title || title,
+    instrument: extractedInstrument,
+    assetClass: result.assetClass || 'Index',
+    timeframe: extractedTimeframe,
+    direction: extractedDirection,
+    entryCondition: extractedEntry,
+    exitCondition: extractedExit,
+    holdingPeriod: extractedHolding,
+    filters: extractedFilters,
+    benchmark: result.benchmark || (extractedInstrument || 'Market Benchmark'),
+    targetHypothesis: extractedHypothesis,
     entities,
     ambiguityScore: missingFields.length,
     missingFields,
@@ -267,7 +297,7 @@ export async function parseQueryWithGroq(
   };
 
   return {
-    experiment: finalizedExperiment,
+    experiment,
     provider: 'groq-gpt-oss-120b'
   };
 }

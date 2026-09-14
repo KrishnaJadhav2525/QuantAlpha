@@ -1,5 +1,5 @@
 export type AssetClass = 'Index' | 'Equity' | 'Commodity' | 'Crypto' | 'Forex';
-export type TradeDirection = 'LONG' | 'SHORT' | 'BOTH';
+export type TradeDirection = 'LONG' | 'SHORT' | 'BOTH' | 'UNSPECIFIED';
 export type FieldStatus = 'specified' | 'inferred' | 'missing';
 export type ImportanceLevel = 'critical' | 'recommended' | 'optional';
 

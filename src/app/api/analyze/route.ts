@@ -38,9 +38,14 @@ export async function POST(incomingRequest: NextRequest) {
         ? caughtError.message
         : 'Failed to analyze query.';
 
+    const isClientInputError =
+      errorMessage.includes('No trading') ||
+      errorMessage.includes('Please enter a trading') ||
+      errorMessage.includes('required');
+
     return NextResponse.json(
       { error: errorMessage },
-      { status: 500 }
+      { status: isClientInputError ? 400 : 500 }
     );
   }
 }
